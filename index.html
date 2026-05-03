@@ -42,7 +42,7 @@
 </head>
 <body>
 <div class="container">
-  <h1>📋 發票登記 <span style="font-size:12px;color:#10b981;font-weight:normal">v2026-05-04-d</span></h1>
+  <h1>📋 發票登記 <span style="font-size:12px;color:#10b981;font-weight:normal">v2026-05-04-e</span></h1>
 
   <details>
     <summary>⚙️ 初次設定（點開填寫）</summary>
@@ -66,8 +66,12 @@
     <div id="scanCounter" class="muted hidden" style="font-family:monospace;text-align:center"></div>
     <p class="muted">⚠️ 對準發票<b>左邊</b>那個較大的 QR Code。如果即時掃描一直失敗，改用下方「照片上傳」更穩定。</p>
     <hr style="border:none;border-top:1px dashed #d1d5db;margin:14px 0">
-    <label>📁 照片上傳備援（拍好照後上傳）</label>
+    <label>📷 直接拍照辨識（推薦）</label>
+    <input type="file" id="qrCapture" accept="image/*" capture="environment" onchange="onFilePick(event)" style="display:none">
+    <button class="success" onclick="document.getElementById('qrCapture').click()">📸 開啟相機拍照</button>
+    <label style="margin-top:10px">📁 從相簿選照片</label>
     <input type="file" id="qrFile" accept="image/*" onchange="onFilePick(event)">
+    <img id="previewImg" style="max-width:100%;display:none;border-radius:8px;margin-top:10px">
     <div id="lastScan" class="preview hidden"></div>
   </div>
 
@@ -97,6 +101,7 @@
 
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/index.min.js"></script>
 <script>
 let scanner = null;
 const $ = id => document.getElementById(id);
@@ -192,20 +197,45 @@ function onScanError(errMsg) {
 async function onFilePick(ev) {
   const file = ev.target.files && ev.target.files[0];
   if (!file) return;
-  showStatus('辨識照片中…(jsQR)', 'info');
+  showStatus('辨識照片中…', 'info');
   try {
     const img = new Image();
     img.src = URL.createObjectURL(file);
     await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
 
-    const decoded = await tryDecodeWithJsQR(img);
-    URL.revokeObjectURL(img.src);
+    const prev = $('previewImg');
+    prev.src = img.src;
+    prev.style.display = 'block';
+
+    let decoded = null;
+    let usedEngine = '';
+
+    showStatus('🔍 嘗試 jsQR…', 'info');
+    decoded = await tryDecodeWithJsQR(img);
+    if (decoded) usedEngine = 'jsQR';
+
+    if (!decoded && window.ZXingBrowser) {
+      showStatus('🔍 jsQR 失敗，改用 ZXing…', 'info');
+      decoded = await tryDecodeWithZXing(file);
+      if (decoded) usedEngine = 'ZXing';
+    }
+
+    if (!decoded && window.Html5Qrcode) {
+      showStatus('🔍 ZXing 失敗，改用 html5-qrcode…', 'info');
+      try {
+        const tmp = new Html5Qrcode("reader");
+        decoded = await tmp.scanFile(file, false);
+        try { await tmp.clear(); } catch {}
+        if (decoded) usedEngine = 'html5-qrcode';
+      } catch {}
+    }
 
     if (decoded) {
-      console.log('jsQR decoded:', decoded);
+      console.log(usedEngine + ' decoded:', decoded);
+      showStatus('✅ 用 ' + usedEngine + ' 解碼成功，長度 ' + decoded.length, 'ok');
       onScanSuccess(decoded);
     } else {
-      showStatus('jsQR 無法在這張照片中找到 QR Code。\n請確認：1) 拍到左邊大 QR  2) QR 佔畫面 1/3 以上  3) 對焦清楚不要糊', 'err');
+      showStatus('三套解碼器都失敗了。最常見原因：\n• QR 沒拍到完整（被切到/被遮擋）\n• 照片太糊\n• 反光太強\n請看上方預覽圖：左邊大 QR 必須完整、四邊都看得到。', 'err');
     }
   } catch (e) {
     showStatus('讀取照片失敗：' + e.message, 'err');
@@ -224,12 +254,25 @@ async function tryDecodeWithJsQR(img) {
     canvas.width = w; canvas.height = h;
     ctx.drawImage(img, 0, 0, w, h);
     const data = ctx.getImageData(0, 0, w, h);
-    for (const inv of ['dontInvert', 'attemptBoth']) {
+    for (const inv of ['dontInvert', 'attemptBoth', 'invertFirst']) {
       const code = jsQR(data.data, w, h, { inversionAttempts: inv });
       if (code && code.data) return code.data;
     }
   }
   return null;
+}
+
+async function tryDecodeWithZXing(file) {
+  try {
+    const reader = new ZXingBrowser.BrowserMultiFormatReader();
+    const url = URL.createObjectURL(file);
+    const result = await reader.decodeFromImageUrl(url);
+    URL.revokeObjectURL(url);
+    return result && result.getText ? result.getText() : null;
+  } catch (e) {
+    console.warn('ZXing failed:', e);
+    return null;
+  }
 }
 
 async function stopScan() {
