@@ -42,7 +42,7 @@
 </head>
 <body>
 <div class="container">
-  <h1>📋 發票登記 <span style="font-size:12px;color:#10b981;font-weight:normal">v2026-05-04-c</span></h1>
+  <h1>📋 發票登記 <span style="font-size:12px;color:#10b981;font-weight:normal">v2026-05-04-d</span></h1>
 
   <details>
     <summary>⚙️ 初次設定（點開填寫）</summary>
@@ -96,6 +96,7 @@
 </div>
 
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 <script>
 let scanner = null;
 const $ = id => document.getElementById(id);
@@ -191,17 +192,44 @@ function onScanError(errMsg) {
 async function onFilePick(ev) {
   const file = ev.target.files && ev.target.files[0];
   if (!file) return;
-  showStatus('辨識照片中…', 'info');
-  const tmp = new Html5Qrcode("reader");
+  showStatus('辨識照片中…(jsQR)', 'info');
   try {
-    const decoded = await tmp.scanFile(file, false);
-    onScanSuccess(decoded);
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
+
+    const decoded = await tryDecodeWithJsQR(img);
+    URL.revokeObjectURL(img.src);
+
+    if (decoded) {
+      console.log('jsQR decoded:', decoded);
+      onScanSuccess(decoded);
+    } else {
+      showStatus('jsQR 無法在這張照片中找到 QR Code。\n請確認：1) 拍到左邊大 QR  2) QR 佔畫面 1/3 以上  3) 對焦清楚不要糊', 'err');
+    }
   } catch (e) {
-    showStatus('照片辨識失敗：' + e + '\n請拍清楚一點、QR 佔畫面 1/3 以上', 'err');
+    showStatus('讀取照片失敗：' + e.message, 'err');
   } finally {
-    try { await tmp.clear(); } catch {}
     ev.target.value = '';
   }
+}
+
+async function tryDecodeWithJsQR(img) {
+  const widths = [Math.min(1920, img.naturalWidth), 1280, 800, img.naturalWidth];
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  for (const w of [...new Set(widths)]) {
+    const scale = w / img.naturalWidth;
+    const h = Math.round(img.naturalHeight * scale);
+    canvas.width = w; canvas.height = h;
+    ctx.drawImage(img, 0, 0, w, h);
+    const data = ctx.getImageData(0, 0, w, h);
+    for (const inv of ['dontInvert', 'attemptBoth']) {
+      const code = jsQR(data.data, w, h, { inversionAttempts: inv });
+      if (code && code.data) return code.data;
+    }
+  }
+  return null;
 }
 
 async function stopScan() {
