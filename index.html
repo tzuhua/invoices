@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>發票登記</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="theme-color" content="#305496">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="發票">
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Microsoft JhengHei","PingFang TC",sans-serif;background:#f5f7fa;color:#1f2937;padding-bottom:40px}
+  .container{max-width:520px;margin:0 auto;padding:16px}
+  h1{font-size:22px;margin:8px 0 16px;color:#305496}
+  button{display:block;width:100%;padding:14px;font-size:16px;font-weight:600;border:none;border-radius:10px;background:#305496;color:#fff;margin:6px 0;cursor:pointer}
+  button:active{opacity:0.85}
+  button.secondary{background:#6b7280}
+  button.success{background:#10b981}
+  button:disabled{opacity:0.5}
+  input,textarea{width:100%;padding:10px;font-size:15px;border:1px solid #d1d5db;border-radius:8px;margin:4px 0 10px;font-family:inherit}
+  textarea{resize:vertical;min-height:60px}
+  label{font-size:13px;color:#4b5563;font-weight:600;display:block;margin-top:4px}
+  .card{background:#fff;border-radius:12px;padding:16px;margin:12px 0;box-shadow:0 1px 3px rgba(0,0,0,0.06)}
+  .hidden{display:none}
+  #reader{width:100%;border-radius:8px;overflow:hidden}
+  .status{padding:10px 12px;border-radius:8px;margin:10px 0;font-size:14px;font-weight:500}
+  .status.ok{background:#d1fae5;color:#065f46}
+  .status.err{background:#fee2e2;color:#991b1b}
+  .status.info{background:#dbeafe;color:#1e40af}
+  .row{display:flex;gap:8px}
+  .row>div{flex:1}
+  details{margin:8px 0}
+  summary{cursor:pointer;padding:8px 0;color:#4b5563;font-weight:600}
+  .muted{color:#6b7280;font-size:12px;line-height:1.5;margin:8px 0}
+  .preview{background:#f3f4f6;border-radius:6px;padding:8px 10px;font-size:13px;color:#4b5563;margin:6px 0}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>📋 發票登記</h1>
+
+  <details>
+    <summary>⚙️ 初次設定（點開填寫）</summary>
+    <div class="card">
+      <label>Apps Script Web App URL</label>
+      <input type="url" id="apiUrl" placeholder="https://script.google.com/macros/s/.../exec">
+      <label>共用密鑰（與 Apps Script 內 SECRET 相同）</label>
+      <input type="text" id="apiSecret" placeholder="自行設定的密鑰">
+      <label>我的買方統編（自動填入）</label>
+      <input type="text" id="myTaxId" placeholder="42811516">
+      <button onclick="saveSettings()">💾 儲存設定</button>
+    </div>
+  </details>
+
+  <div id="scanCard" class="card">
+    <button id="startBtn" onclick="startScan()">📷 掃描電子發票 QR Code</button>
+    <button id="stopBtn" class="secondary hidden" onclick="stopScan()">✕ 停止掃描</button>
+    <div id="reader"></div>
+    <p class="muted">對準發票<b>左邊</b>那個較大的 QR Code（含完整資料）</p>
+  </div>
+
+  <div id="formCard" class="card hidden">
+    <div class="preview" id="rawPreview"></div>
+    <label>發票號碼</label><input id="f_invoiceNumber">
+    <label>發票日期</label><input id="f_date">
+    <label>賣方統編</label><input id="f_sellerId">
+    <label>賣方店家（請自行填寫）</label><input id="f_sellerName" placeholder="例：全國加油站九如店">
+    <label>買方統編</label><input id="f_buyerId">
+    <label>品名摘要（可選）</label><textarea id="f_items"></textarea>
+    <div class="row">
+      <div><label>銷售額</label><input id="f_sales" type="number" inputmode="numeric"></div>
+      <div><label>稅額</label><input id="f_tax" type="number" inputmode="numeric"></div>
+      <div><label>總計</label><input id="f_total" type="number" inputmode="numeric"></div>
+    </div>
+    <label>付款方式（可選）</label>
+    <input id="f_payment" placeholder="現金 / 信用卡">
+    <button class="success" onclick="submitInvoice()">✅ 送出至 Google Sheets</button>
+    <button class="secondary" onclick="resetForm()">取消</button>
+  </div>
+
+  <div id="status"></div>
+
+  <p class="muted">💡 此頁面需從 HTTPS 網址開啟才能用相機。建議用 GitHub Pages / Netlify 託管後，從手機瀏覽器選「加入主畫面」即可變成 App。</p>
+</div>
+
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+let scanner = null;
+const $ = id => document.getElementById(id);
+
+function loadSettings() {
+  $('apiUrl').value = localStorage.getItem('apiUrl') || '';
+  $('apiSecret').value = localStorage.getItem('apiSecret') || '';
+  $('myTaxId').value = localStorage.getItem('myTaxId') || '42811516';
+}
+
+function saveSettings() {
+  localStorage.setItem('apiUrl', $('apiUrl').value.trim());
+  localStorage.setItem('apiSecret', $('apiSecret').value.trim());
+  localStorage.setItem('myTaxId', $('myTaxId').value.trim());
+  showStatus('設定已儲存', 'ok');
+}
+
+function showStatus(msg, type) {
+  const s = $('status');
+  s.className = 'status ' + (type || 'info');
+  s.textContent = msg;
+  if (type === 'ok') setTimeout(() => { if (s.textContent === msg) { s.textContent=''; s.className=''; } }, 3500);
+}
+
+function parseInvoiceQR(text) {
+  if (!text || text.length < 77) return null;
+  const num = text.substring(0, 10);
+  if (!/^[A-Z]{2}\d{8}$/.test(num)) return null;
+  const dateRaw = text.substring(10, 17);
+  if (!/^\d{7}$/.test(dateRaw)) return null;
+  const random = text.substring(17, 21);
+  const salesHex = text.substring(21, 29);
+  const totalHex = text.substring(29, 37);
+  const buyerId = text.substring(37, 45);
+  const sellerId = text.substring(45, 53);
+
+  const yyy = parseInt(dateRaw.substring(0, 3), 10);
+  const mm = dateRaw.substring(3, 5);
+  const dd = dateRaw.substring(5, 7);
+  const date = `${yyy + 1911}-${mm}-${dd}`;
+
+  const sales = parseInt(salesHex, 16);
+  const total = parseInt(totalHex, 16);
+  const tax = total - sales;
+
+  const m = parseInt(mm, 10);
+  const ps = m % 2 === 1 ? m : m - 1;
+  const period = `${yyy}年${String(ps).padStart(2,'0')}-${String(ps+1).padStart(2,'0')}月`;
+
+  return {
+    invoiceNumber: `${num.substring(0,2)}-${num.substring(2)}`,
+    date, period, randomCode: random,
+    sales, tax, total,
+    buyerId: buyerId === '00000000' ? '' : buyerId,
+    sellerId,
+  };
+}
+
+async function startScan() {
+  if (scanner) return;
+  $('startBtn').classList.add('hidden');
+  $('stopBtn').classList.remove('hidden');
+  scanner = new Html5Qrcode("reader");
+  try {
+    await scanner.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 260, height: 260 } },
+      onScanSuccess,
+      () => {}
+    );
+  } catch (err) {
+    showStatus('啟動相機失敗：' + err, 'err');
+    stopScan();
+  }
+}
+
+async function stopScan() {
+  if (scanner) {
+    try { await scanner.stop(); scanner.clear(); } catch (e) {}
+    scanner = null;
+  }
+  $('startBtn').classList.remove('hidden');
+  $('stopBtn').classList.add('hidden');
+  $('reader').innerHTML = '';
+}
+
+async function onScanSuccess(decodedText) {
+  await stopScan();
+  const data = parseInvoiceQR(decodedText);
+  if (!data) {
+    showStatus('掃到的 QR Code 不是台灣電子發票格式', 'err');
+    return;
+  }
+  $('rawPreview').textContent = `📄 ${data.invoiceNumber} · ${data.date} · 總計 NT$${data.total}`;
+  $('f_invoiceNumber').value = data.invoiceNumber;
+  $('f_date').value = data.date;
+  $('f_sellerId').value = data.sellerId;
+  $('f_buyerId').value = data.buyerId || (localStorage.getItem('myTaxId') || '');
+  $('f_sales').value = data.sales;
+  $('f_tax').value = data.tax;
+  $('f_total').value = data.total;
+  $('f_sellerName').value = '';
+  $('f_items').value = '';
+  $('f_payment').value = '';
+  $('formCard').classList.remove('hidden');
+  $('formCard').dataset.period = data.period;
+  $('formCard').scrollIntoView({behavior:'smooth'});
+  showStatus('已辨識 QR Code，請補充店家名稱後送出', 'ok');
+}
+
+async function submitInvoice() {
+  const url = (localStorage.getItem('apiUrl') || $('apiUrl').value).trim();
+  const secret = (localStorage.getItem('apiSecret') || $('apiSecret').value).trim();
+  if (!url) { showStatus('請先在「初次設定」填寫 Apps Script URL', 'err'); return; }
+
+  const payload = {
+    secret,
+    "發票號碼": $('f_invoiceNumber').value,
+    "發票日期": $('f_date').value,
+    "期別": $('formCard').dataset.period || '',
+    "賣方統編": $('f_sellerId').value,
+    "賣方店家": $('f_sellerName').value,
+    "買方統編": $('f_buyerId').value,
+    "品名摘要": $('f_items').value,
+    "銷售額": Number($('f_sales').value) || 0,
+    "稅額": Number($('f_tax').value) || 0,
+    "總計": Number($('f_total').value) || 0,
+    "付款方式": $('f_payment').value,
+    "來源檔案": 'PWA-' + new Date().toISOString().replace(/[:.]/g,'-'),
+  };
+
+  showStatus('傳送中…', 'info');
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    });
+    const json = await res.json();
+    if (json.status === 'ok') {
+      showStatus(`✅ 已寫入第 ${json.row} 列`, 'ok');
+      resetForm();
+    } else {
+      showStatus('伺服器回應：' + (json.error || '失敗'), 'err');
+    }
+  } catch (e) {
+    showStatus('送出失敗：' + e.message, 'err');
+  }
+}
+
+function resetForm() {
+  $('formCard').classList.add('hidden');
+  ['f_invoiceNumber','f_date','f_sellerId','f_sellerName','f_buyerId','f_items','f_sales','f_tax','f_total','f_payment'].forEach(id => $(id).value = '');
+  $('rawPreview').textContent = '';
+}
+
+loadSettings();
+</script>
+</body>
+</html>
