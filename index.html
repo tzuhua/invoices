@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>發票登記</title>
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-192.png">
@@ -39,7 +42,7 @@
 </head>
 <body>
 <div class="container">
-  <h1>📋 發票登記</h1>
+  <h1>📋 發票登記 <span style="font-size:12px;color:#10b981;font-weight:normal">v2026-05-04-b</span></h1>
 
   <details>
     <summary>⚙️ 初次設定（點開填寫）</summary>
@@ -109,8 +112,10 @@ function saveSettings() {
 function showStatus(msg, type) {
   const s = $('status');
   s.className = 'status ' + (type || 'info');
+  s.style.whiteSpace = 'pre-wrap';
   s.textContent = msg;
-  if (type === 'ok') setTimeout(() => { if (s.textContent === msg) { s.textContent=''; s.className=''; } }, 3500);
+  s.scrollIntoView({behavior:'smooth', block:'nearest'});
+  if (type === 'ok') setTimeout(() => { if (s.textContent === msg) { s.textContent=''; s.className=''; } }, 4000);
 }
 
 function parseInvoiceQR(text) {
@@ -175,15 +180,26 @@ async function stopScan() {
   $('reader').innerHTML = '';
 }
 
+let scanLock = false;
 async function onScanSuccess(decodedText) {
-  await stopScan();
+  if (scanLock) return;
+  scanLock = true;
+  try {
+    await stopScan();
+  } catch(e) { console.error('stopScan err', e); }
   console.log('Decoded QR:', decodedText);
   const ls = $('lastScan');
   ls.classList.remove('hidden');
   ls.innerHTML = `<b>掃到的內容（前 200 字）：</b><br><span style="word-break:break-all;font-family:monospace;font-size:12px">${
     (decodedText || '(空)').substring(0, 200).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))
   }</span><br><b>長度：</b>${(decodedText||'').length} 字元`;
-  const data = parseInvoiceQR(decodedText);
+  let data = null;
+  try { data = parseInvoiceQR(decodedText); }
+  catch(e) {
+    showStatus('解析時發生錯誤：' + e.message, 'err');
+    scanLock = false;
+    return;
+  }
   if (!data) {
     let reason = '不是電子發票主 QR 格式';
     if (!decodedText) reason = '空字串';
@@ -191,6 +207,7 @@ async function onScanSuccess(decodedText) {
     else if (!/^[A-Z]{2}\d{8}/.test(decodedText)) reason = `開頭不是字軌號碼（前 10 字: "${decodedText.substring(0,10)}"）— 多半是右邊小 QR`;
     else if (!/^\d{7}/.test(decodedText.substring(10,17))) reason = `日期欄位錯誤（"${decodedText.substring(10,17)}"）`;
     showStatus('❌ 解析失敗：' + reason + '。請對準左邊大 QR 重掃。', 'err');
+    scanLock = false;
     return;
   }
   $('rawPreview').textContent = `📄 ${data.invoiceNumber} · ${data.date} · 總計 NT$${data.total}`;
@@ -208,6 +225,7 @@ async function onScanSuccess(decodedText) {
   $('formCard').dataset.period = data.period;
   $('formCard').scrollIntoView({behavior:'smooth'});
   showStatus('已辨識 QR Code，請補充店家名稱後送出', 'ok');
+  scanLock = false;
 }
 
 async function submitInvoice() {
