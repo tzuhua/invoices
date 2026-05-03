@@ -51,6 +51,8 @@
       <label>我的買方統編（自動填入）</label>
       <input type="text" id="myTaxId" placeholder="42811516">
       <button onclick="saveSettings()">💾 儲存設定</button>
+      <button class="secondary" onclick="testConnection()">🔌 測試連線（GET）</button>
+      <button class="secondary" onclick="testWrite()">🧪 測試寫入一筆假資料</button>
     </div>
   </details>
 
@@ -58,7 +60,8 @@
     <button id="startBtn" onclick="startScan()">📷 掃描電子發票 QR Code</button>
     <button id="stopBtn" class="secondary hidden" onclick="stopScan()">✕ 停止掃描</button>
     <div id="reader"></div>
-    <p class="muted">對準發票<b>左邊</b>那個較大的 QR Code（含完整資料）</p>
+    <p class="muted">⚠️ 對準發票<b>左邊</b>那個較大的 QR Code（含完整資料）。<b>右邊</b>那個小的 QR 只有品名清單，掃了不會成功。</p>
+    <div id="lastScan" class="preview hidden"></div>
   </div>
 
   <div id="formCard" class="card hidden">
@@ -174,9 +177,20 @@ async function stopScan() {
 
 async function onScanSuccess(decodedText) {
   await stopScan();
+  console.log('Decoded QR:', decodedText);
+  const ls = $('lastScan');
+  ls.classList.remove('hidden');
+  ls.innerHTML = `<b>掃到的內容（前 200 字）：</b><br><span style="word-break:break-all;font-family:monospace;font-size:12px">${
+    (decodedText || '(空)').substring(0, 200).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))
+  }</span><br><b>長度：</b>${(decodedText||'').length} 字元`;
   const data = parseInvoiceQR(decodedText);
   if (!data) {
-    showStatus('掃到的 QR Code 不是台灣電子發票格式', 'err');
+    let reason = '不是電子發票主 QR 格式';
+    if (!decodedText) reason = '空字串';
+    else if (decodedText.length < 77) reason = `太短（${decodedText.length} 字元，主 QR 至少 77 字元）— 可能掃到右邊小 QR`;
+    else if (!/^[A-Z]{2}\d{8}/.test(decodedText)) reason = `開頭不是字軌號碼（前 10 字: "${decodedText.substring(0,10)}"）— 多半是右邊小 QR`;
+    else if (!/^\d{7}/.test(decodedText.substring(10,17))) reason = `日期欄位錯誤（"${decodedText.substring(10,17)}"）`;
+    showStatus('❌ 解析失敗：' + reason + '。請對準左邊大 QR 重掃。', 'err');
     return;
   }
   $('rawPreview').textContent = `📄 ${data.invoiceNumber} · ${data.date} · 總計 NT$${data.total}`;
@@ -217,23 +231,72 @@ async function submitInvoice() {
     "來源檔案": 'PWA-' + new Date().toISOString().replace(/[:.]/g,'-'),
   };
 
+  await postToApi(url, payload, '✅ 已寫入', () => resetForm());
+}
+
+async function postToApi(url, payload, okPrefix, onOk) {
   showStatus('傳送中…', 'info');
+  console.log('POST →', url, payload);
   try {
     const res = await fetch(url, {
       method: 'POST',
+      mode: 'cors',
+      redirect: 'follow',
       body: JSON.stringify(payload),
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     });
-    const json = await res.json();
+    const text = await res.text();
+    console.log('Response', res.status, text);
+    let json;
+    try { json = JSON.parse(text); } catch { json = null; }
+    if (!json) {
+      showStatus(`HTTP ${res.status}：伺服器未回傳 JSON。\n回傳內容：${text.substring(0, 300)}`, 'err');
+      return;
+    }
     if (json.status === 'ok') {
-      showStatus(`✅ 已寫入第 ${json.row} 列`, 'ok');
-      resetForm();
+      showStatus(`${okPrefix}（第 ${json.row || '?'} 列）`, 'ok');
+      if (onOk) onOk();
     } else {
       showStatus('伺服器回應：' + (json.error || '失敗'), 'err');
     }
   } catch (e) {
-    showStatus('送出失敗：' + e.message, 'err');
+    showStatus('送出失敗：' + e.message + '\n（檢查 1) Apps Script 部署存取權是否為「任何人」 2) URL 結尾是 /exec）', 'err');
   }
+}
+
+async function testConnection() {
+  const url = (localStorage.getItem('apiUrl') || $('apiUrl').value).trim();
+  if (!url) { showStatus('請先填 URL', 'err'); return; }
+  showStatus('GET ' + url, 'info');
+  try {
+    const res = await fetch(url, { method: 'GET' });
+    const text = await res.text();
+    console.log('GET response', res.status, text);
+    showStatus(`HTTP ${res.status}\n${text.substring(0, 400)}`, res.ok ? 'ok' : 'err');
+  } catch (e) {
+    showStatus('GET 失敗：' + e.message, 'err');
+  }
+}
+
+async function testWrite() {
+  const url = (localStorage.getItem('apiUrl') || $('apiUrl').value).trim();
+  const secret = (localStorage.getItem('apiSecret') || $('apiSecret').value).trim();
+  if (!url) { showStatus('請先填 URL', 'err'); return; }
+  const stamp = Date.now().toString().slice(-8);
+  const payload = {
+    secret,
+    "發票號碼": `TEST-${stamp}`,
+    "發票日期": new Date().toISOString().slice(0,10),
+    "期別": "(測試)",
+    "賣方統編": "00000000",
+    "賣方店家": "測試店家",
+    "買方統編": localStorage.getItem('myTaxId') || '',
+    "品名摘要": "PWA 連線測試",
+    "銷售額": 100, "稅額": 5, "總計": 105,
+    "付款方式": "測試",
+    "來源檔案": "TEST-PWA",
+  };
+  await postToApi(url, payload, '✅ 測試寫入成功');
 }
 
 function resetForm() {
