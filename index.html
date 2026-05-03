@@ -42,7 +42,7 @@
 </head>
 <body>
 <div class="container">
-  <h1>📋 發票登記 <span style="font-size:12px;color:#10b981;font-weight:normal">v2026-05-04-e</span></h1>
+  <h1>📋 發票登記 <span style="font-size:12px;color:#10b981;font-weight:normal">v2026-05-04-f</span></h1>
 
   <details>
     <summary>⚙️ 初次設定（點開填寫）</summary>
@@ -60,17 +60,21 @@
   </details>
 
   <div id="scanCard" class="card">
-    <button id="startBtn" onclick="startScan()">📷 即時掃描 QR Code</button>
+    <label style="font-size:14px;color:#10b981">⭐ 推薦方式：AI 辨識（不依賴 QR）</label>
+    <input type="file" id="aiCapture" accept="image/*" capture="environment" onchange="onAiPick(event)" style="display:none">
+    <input type="file" id="aiFile" accept="image/*" onchange="onAiPick(event)" style="display:none">
+    <button class="success" onclick="document.getElementById('aiCapture').click()">🤖📸 拍照後 AI 辨識整張發票</button>
+    <button class="secondary" onclick="document.getElementById('aiFile').click()">🤖📁 從相簿選照片給 AI 辨識</button>
+    <p class="muted">用 Google Gemini AI 直接讀整張發票，QR 模糊、彎曲、手寫三聯式都能辨識。需先設定 API key（見 README）。</p>
+    <hr style="border:none;border-top:1px dashed #d1d5db;margin:14px 0">
+    <label style="font-size:13px">QR 解碼方式（備用）</label>
+    <button id="startBtn" class="secondary" onclick="startScan()">📷 即時掃描 QR Code</button>
     <button id="stopBtn" class="secondary hidden" onclick="stopScan()">✕ 停止掃描</button>
     <div id="reader"></div>
     <div id="scanCounter" class="muted hidden" style="font-family:monospace;text-align:center"></div>
-    <p class="muted">⚠️ 對準發票<b>左邊</b>那個較大的 QR Code。如果即時掃描一直失敗，改用下方「照片上傳」更穩定。</p>
-    <hr style="border:none;border-top:1px dashed #d1d5db;margin:14px 0">
-    <label>📷 直接拍照辨識（推薦）</label>
     <input type="file" id="qrCapture" accept="image/*" capture="environment" onchange="onFilePick(event)" style="display:none">
-    <button class="success" onclick="document.getElementById('qrCapture').click()">📸 開啟相機拍照</button>
-    <label style="margin-top:10px">📁 從相簿選照片</label>
-    <input type="file" id="qrFile" accept="image/*" onchange="onFilePick(event)">
+    <button class="secondary" onclick="document.getElementById('qrCapture').click()">📸 拍 QR + 三套引擎解</button>
+    <input type="file" id="qrFile" accept="image/*" onchange="onFilePick(event)" style="margin-top:6px">
     <img id="previewImg" style="max-width:100%;display:none;border-radius:8px;margin-top:10px">
     <div id="lastScan" class="preview hidden"></div>
   </div>
@@ -192,6 +196,86 @@ function onScanError(errMsg) {
   if (attemptCount % 5 === 0) {
     $('scanCounter').textContent = `🔍 已掃描 ${attemptCount} 幀，未偵測到 QR…`;
   }
+}
+
+async function onAiPick(ev) {
+  const file = ev.target.files && ev.target.files[0];
+  if (!file) return;
+  const url = (localStorage.getItem('apiUrl') || $('apiUrl').value).trim();
+  const secret = (localStorage.getItem('apiSecret') || $('apiSecret').value).trim();
+  if (!url) { showStatus('請先在「初次設定」填寫 Apps Script URL', 'err'); return; }
+
+  showStatus('📷 載入照片中…', 'info');
+  try {
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
+
+    const prev = $('previewImg');
+    prev.src = img.src;
+    prev.style.display = 'block';
+
+    showStatus('📦 壓縮中…', 'info');
+    const { base64, mimeType, size } = await compressImage(img, 1600, 0.85);
+    URL.revokeObjectURL(img.src);
+
+    showStatus(`🤖 上傳給 Gemini AI 辨識中…(圖片 ${(size/1024).toFixed(0)} KB)`, 'info');
+    const res = await fetch(url, {
+      method: 'POST',
+      body: JSON.stringify({ secret, action: 'aiParse', imageBase64: base64, mimeType }),
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    });
+    const json = await res.json();
+
+    if (json.status !== 'ok') {
+      showStatus('AI 辨識失敗：' + (json.error || '未知錯誤'), 'err');
+      return;
+    }
+
+    const p = json.parsed;
+    console.log('AI parsed:', p);
+    $('rawPreview').textContent = `🤖 AI: ${p.invoiceNumber || '(無發票號)'} · ${p.date || ''} · 總計 NT$${p.total || 0}`;
+    $('f_invoiceNumber').value = p.invoiceNumber || '';
+    $('f_date').value = p.date || '';
+    $('f_sellerId').value = p.sellerId || '';
+    $('f_sellerName').value = p.sellerName || '';
+    $('f_buyerId').value = p.buyerId || (localStorage.getItem('myTaxId') || '');
+    $('f_items').value = p.items || '';
+    $('f_sales').value = p.sales || 0;
+    $('f_tax').value = p.tax || 0;
+    $('f_total').value = p.total || 0;
+    $('f_payment').value = p.payment || '';
+    $('formCard').dataset.period = p.period || '';
+    $('formCard').classList.remove('hidden');
+    $('formCard').scrollIntoView({behavior:'smooth'});
+    showStatus('✅ AI 辨識完成，請檢查欄位後送出', 'ok');
+  } catch (e) {
+    showStatus('辨識過程錯誤：' + e.message, 'err');
+  } finally {
+    ev.target.value = '';
+  }
+}
+
+async function compressImage(img, maxDim, quality) {
+  const ratio = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.round(img.naturalWidth * ratio);
+  const h = Math.round(img.naturalHeight * ratio);
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, w, h);
+  const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', quality));
+  const base64 = await blobToBase64(blob);
+  return { base64, mimeType: 'image/jpeg', size: blob.size };
+}
+
+function blobToBase64(blob) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(',')[1]);
+    r.onerror = rej;
+    r.readAsDataURL(blob);
+  });
 }
 
 async function onFilePick(ev) {
